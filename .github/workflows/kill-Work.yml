@@ -5,6 +5,7 @@ on:
     inputs:
       repo:
         description: '清理的仓库（格式：owner/repo）'
+        default: 'saintessdivine/make-GKI'
         required: true
 
 permissions:
