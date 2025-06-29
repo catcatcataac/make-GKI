@@ -1,0 +1,209 @@
+name: Build OnePlus KernelSU Next
+
+on:
+  workflow_dispatch:
+    inputs:
+      CPU:
+        description: "CPU分支"
+        required: true
+        type: choice
+        options:
+          - 'sm8750'
+        default: 'sm8750'
+      FEIL:
+        description: "手机型号"
+        required: true
+        type: choice
+        options:
+          - 'oneplus_13'
+        default: 'oneplus_13'
+      CPUD:
+        description: "处理器代号"
+        required: true
+        type: choice
+        options:
+          - 'sun'
+        default: 'sun'
+      ANDROID_VERSION:
+        description: "内核安卓版本"
+        required: true
+        type: choice
+        options:
+          - 'android15'
+        default: 'android15'
+      KERNEL_VERSION:
+        description: "内核版本"
+        required: true
+        type: choice
+        options:
+          - '6.6'
+        default: '6.6'
+
+jobs:
+  build:
+    name: Build Kernel for ${{ github.event.inputs.FEIL }}
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      CCACHE_DIR: /home/runner/.ccache  
+      CCACHE_MAXSIZE: 8G
+      KSUVER: ""  # 会后续更新
+
+    steps:
+      - name: 🚀 Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: 📦 Configure Git
+        run: |
+          git config --global user.name "build"
+          git config --global user.email "2210077278@qq.com"
+
+      - name: 📦 Install dependencies
+        run: |
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install -y python3 git curl ccache libelf-dev
+
+      - name: 📥 Restore ccache
+        uses: actions/cache@v3
+        with:
+          path: /home/runner/.ccache
+          key: ccache-${{ runner.os }}-${{ github.ref }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: 📥 Clone SM8750 kernel sources
+        run: |
+          git clone --depth=1 -b oneplus/sm8750_v_15.0.0_oneplus_13 https://github.com/OnePlusOSS/android_kernel_oneplus_sm8750.git kernel_workspace
+
+      - name: 🔧 Clean up and customize kernel version suffix
+        run: |
+          rm kernel_workspace/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          rm kernel_workspace/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          sed -i 's/ -dirty//g' kernel_workspace/common/scripts/setlocalversion
+          sed -i 's/ -dirty//g' kernel_workspace/msm-kernel/scripts/setlocalversion || true
+          sed -i 's/ -dirty//g' kernel_workspace/external/dtc/scripts/setlocalversion || true
+          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_workspace/common/scripts/setlocalversion
+          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_workspace/msm-kernel/scripts/setlocalversion
+          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_workspace/external/dtc/scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "-Free-VOCALOID-PPY-Zs-Use-0"|' kernel_workspace/common/scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "-Free-VOCALOID-PPY-Zs-Use-0"|' kernel_workspace/msm-kernel/scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "-Free-VOCALOID-PPY-Zs-Use-0"|' kernel_workspace/external/dtc/scripts/setlocalversion
+
+      - name: ⚙️ Set up KernelSU Next
+        run: |
+          cd kernel_workspace
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          cd KernelSU-Next
+          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" 10200)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          sed -i "s/DKSU_VERSION=11998/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+
+      - name: 🔧 Set up SUSFS
+        run: |
+          cd kernel_workspace
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}
+          git clone https://github.com/Xiaomichael/kernel_patches.git
+          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch common/
+          cp kernel_patches/next/syscall_hooks.patch common/
+          cp kernel_patches/next/0001-kernel-implement-susfs-v1.5.8-KernelSU-Next-v1.0.8.patch KernelSU-Next/
+          cp susfs4ksu/kernel_patches/fs/* common/fs/
+          cp susfs4ksu/kernel_patches/include/linux/* common/include/linux/
+          cd KernelSU-Next
+          patch -p1 < 0001-kernel-implement-susfs-v1.5.8-KernelSU-Next-v1.0.8.patch || true
+          cd ../common
+          patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
+          cp ../kernel_patches/69_hide_stuff.patch ./
+          patch -p1 -F 3 < 69_hide_stuff.patch
+          patch -p1 -F 3 < syscall_hooks.patch
+
+      - name: 🔧 Apply new hook & Add configuration
+        run: |
+          cd kernel_workspace/common
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_KPROBES_HOOK=n" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_TCP_CONG_ADVANCED=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_TCP_CONG_BBR=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_SCH_FQ=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_TCP_CONG_BIC=n" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_TCP_CONG_WESTWOOD=n" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_TCP_CONG_HTCP=n" >> arch/arm64/configs/gki_defconfig
+          sed -i 's/check_defconfig//' ../build.config.gki
+
+      - name: 🔨 Build Kernel
+        run: |
+          set -e
+          export KBUILD_BUILD_TIMESTAMP="Wed May 29 07:25:40 UTC 2025"
+          cd kernel_workspace
+          LTO=thin ./kernel_platform/oplus/build/oplus_build_kernel.sh "${{ github.event.inputs.CPUD }}" gki
+
+      - name: 📦 Package kernel to AnyKernel3
+        run: |
+          git clone https://github.com/Xiaomichael/AnyKernel3 --depth=1
+          rm -rf ./AnyKernel3/.git
+
+          dirs=(
+            "kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/"
+            "kernel_workspace/kernel_platform/bazel-out/k8-fastbuild/bin/msm-kernel/${{ github.event.inputs.CPUD }}_gki_kbuild_mixed_tree/"
+            "kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-gki/dist/"
+            "kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/arch/arm64/boot/"
+            "kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/arch/arm64/boot/"
+            "kernel_workspace/kernel_platform/common/out/arch/arm64/boot/"
+          )
+
+          image_path=""
+          for dir in "${dirs[@]}"; do
+            if [ -f "$dir/Image" ]; then
+              image_path="$dir/Image"
+              break
+            fi
+          done
+
+          if [ -z "$image_path" ]; then
+            image_path=$(find "./kernel_workspace/kernel_platform/common/out/" -name "Image" | head -n 1)
+          fi
+
+          if [ -n "$image_path" ] && [ -f "$image_path" ]; then
+            echo "Found Image: $image_path"
+            target_dir="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/"
+            mkdir -p "$target_dir"
+            if [ "$(realpath "$image_path")" != "$(realpath "$target_dir/Image")" ]; then
+              cp "$image_path" "$target_dir"
+            else
+              echo "Source and target are the same, skip copy"
+            fi
+            cp "$target_dir/Image" ./AnyKernel3/Image
+          else
+            echo "Image file not found, build may have failed"
+            exit 1
+          fi
+
+      - name: 📤 Upload AnyKernel3
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3_KernelSU_Next_${{ env.KSUVER }}_${{ github.event.inputs.FEIL }}
+          path: ./AnyKernel3/*
