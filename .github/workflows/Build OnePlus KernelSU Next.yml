@@ -1,205 +1,130 @@
-name: Build OnePlus KernelSU Next
+name: Build and Release OnePlus 13 Kernel (Android 15, GKI 6.6)
+
+permissions:
+  contents: write
+  actions: write
 
 on:
   workflow_dispatch:
     inputs:
-      CPU:
-        description: "CPU分支"
+      make_release:
+        description: 'Do you want to create a release?'
+        required: true
+        type: boolean
+        default: false
+      ksun_branch:
+        description: "KernelSU Next Branch"
         required: true
         type: choice
         options:
-          - 'sm8750'
-        default: 'sm8750'
-      FEIL:
-        description: "手机型号"
-        required: true
-        type: choice
-        options:
-          - 'oneplus_13'
-        default: 'oneplus_13'
-      CPUD:
-        description: "处理器代号"
-        required: true
-        type: choice
-        options:
-          - 'sun'
-        default: 'sun'
-      ANDROID_VERSION:
-        description: "内核安卓版本"
-        required: true
-        type: choice
-        options:
-          - 'android15'
-        default: 'android15'
-      KERNEL_VERSION:
-        description: "内核版本"
-        required: true
-        type: choice
-        options:
-          - '6.6'
-        default: '6.6'
+          - stable
+          - next
+        default: next
 
 jobs:
-  build:
-    name: Build Kernel for ${{ github.event.inputs.FEIL }}
+  build-op13:
+    name: Build Kernel (OnePlus 13 - GKI 6.6 Android 15)
     runs-on: ubuntu-latest
+    steps:
+      - name: Set Static SUSFS Branch
+        id: get-susfs-branch
+        run: |
+          echo "susfs_branch=gki-android15-6.6" >> $GITHUB_OUTPUT
+
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Build Kernel
+        uses: ./.github/actions
+        with:
+          model: OP13
+          soc: sun
+          branch: oneplus/sm8750
+          manifest: oneplus_13.xml
+          android_version: android15
+          kernel_version: "6.6"
+          ksun_branch: ${{ inputs.ksun_branch }}
+          susfs_branch: ${{ steps.get-susfs-branch.outputs.susfs_branch }}
+
+  trigger-release:
+    needs: build-op13
+    runs-on: ubuntu-latest
+    if: ${{ inputs.make_release }}
     env:
-      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
-      CCACHE_NOHASHDIR: "true"
-      CCACHE_HARDLINK: "true"
-      CCACHE_DIR: /home/runner/.ccache  
-      CCACHE_MAXSIZE: 8G
-      KSUVER: ""
+      REPO_OWNER: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_NAME: "*TEST BUILD* OnePlus 13 Kernel with KernelSU Next & SUSFS v1.5.8 *TEST BUILD*"
+      RELEASE_NOTES: |
+        This release contains KernelSU Next and SUSFS v1.5.8
+
+        Module:
+        -> https://github.com/sidex15/ksu_module_susfs
+
+        Non-Official Managers:
+        -> https://github.com/KernelSU-Next/KernelSU-Next
+
+        Features:
+        [+] KernelSU-Next
+        [+] SUSFS v1.5.8
+        [+] Wireguard Support
+        [+] Maphide LineageOS Detections
+        [+] Futile Maphide for jit-zygote-cache Detections
+        [+] Magic Mount Support
+        [+] Ptrace message leak fix for kernels < 5.16
+        [+] Manual Hooks [scope_min_manual_hooks_v1.4]
+        [+] CONFIG_TMPFS_XATTR Support [Mountify Support]
+        [+] BBR v1 Support
+        [+] HMBIRD scx support for OnePlus 13
 
     steps:
-      - name: 🚀 Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      - name: 📦 Configure Git
+      - name: Generate and Create New Tag
         run: |
-          git config --global user.name "build"
-          git config --global user.email "2210077278@qq.com"
-
-      - name: 📦 Install dependencies
-        run: |
-          sudo apt update && sudo apt upgrade -y
-          sudo apt install -y python3 git curl ccache libelf-dev
-
-      - name: 📥 Restore ccache
-        uses: actions/cache@v3
-        with:
-          path: /home/runner/.ccache
-          key: ccache-${{ runner.os }}-${{ github.ref }}
-          restore-keys: |
-            ccache-${{ runner.os }}-
-
-      - name: 📥 Clone SM8750 kernel sources
-        run: |
-          git clone --depth=1 -b oneplus/sm8750_v_15.0.0_oneplus_13 https://github.com/OnePlusOSS/android_kernel_oneplus_sm8750.git kernel_workspace
-
-      - name: 🔧 Clean up and customize kernel version suffix
-        run: |
-          find kernel_workspace -type f -name 'abi_gki_protected_exports_*' -exec rm -f {} \; || echo "No protected exports!"
-          find kernel_workspace -type f -name 'setlocalversion' | while read file; do
-            echo "Processing $file"
-            sed -i 's/ -dirty//g' "$file"
-            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$file"
-            sed -i '$s|echo "\$res"|echo "-Free-VOCALOID-PPY-Zs-Use-0"|' "$file"
-          done
-
-      - name: ⚙️ Set up KernelSU Next
-        run: |
-          cd kernel_workspace
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
-          cd KernelSU-Next
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" 10200)
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          sed -i "s/DKSU_VERSION=11998/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
-
-      - name: 🔧 Set up SUSFS
-        run: |
-          cd kernel_workspace
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}
-          git clone https://github.com/Xiaomichael/kernel_patches.git
-          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch common/
-          cp kernel_patches/next/syscall_hooks.patch common/
-          cp kernel_patches/next/0001-kernel-implement-susfs-v1.5.8-KernelSU-Next-v1.0.8.patch KernelSU-Next/
-          cp susfs4ksu/kernel_patches/fs/* common/fs/
-          cp susfs4ksu/kernel_patches/include/linux/* common/include/linux/
-          cd KernelSU-Next
-          patch -p1 < 0001-kernel-implement-susfs-v1.5.8-KernelSU-Next-v1.0.8.patch || true
-          cd ../common
-          patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
-          cp ../kernel_patches/69_hide_stuff.patch ./
-          patch -p1 -F 3 < 69_hide_stuff.patch
-          patch -p1 -F 3 < syscall_hooks.patch
-
-      - name: 🔧 Apply new hook & Add configuration
-        run: |
-          cd kernel_workspace/common
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_KPROBES_HOOK=n" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_TCP_CONG_ADVANCED=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_TCP_CONG_BBR=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NET_SCH_FQ=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_TCP_CONG_BIC=n" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_TCP_CONG_WESTWOOD=n" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_TCP_CONG_HTCP=n" >> arch/arm64/configs/gki_defconfig
-          sed -i 's/check_defconfig//' ../build.config.gki
-
-      - name: 🔨 Build Kernel
-        run: |
-          set -e
-          export KBUILD_BUILD_TIMESTAMP="Wed May 29 07:25:40 UTC 2025"
-          cd kernel_workspace
-          LTO=thin ./kernel_platform/oplus/build/oplus_build_kernel.sh "${{ github.event.inputs.CPUD }}" gki
-
-      - name: 📦 Package kernel to AnyKernel3
-        run: |
-          git clone https://github.com/Xiaomichael/AnyKernel3 --depth=1
-          rm -rf ./AnyKernel3/.git
-
-          dirs=(
-            "kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/"
-            "kernel_workspace/kernel_platform/bazel-out/k8-fastbuild/bin/msm-kernel/${{ github.event.inputs.CPUD }}_gki_kbuild_mixed_tree/"
-            "kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-gki/dist/"
-            "kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/arch/arm64/boot/"
-            "kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-gki/gki_kernel/common/arch/arm64/boot/"
-            "kernel_workspace/kernel_platform/common/out/arch/arm64/boot/"
-          )
-
-          image_path=""
-          for dir in "${dirs[@]}"; do
-            if [ -f "$dir/Image" ]; then
-              image_path="$dir/Image"
-              break
-            fi
-          done
-
-          if [ -z "$image_path" ]; then
-            image_path=$(find "./kernel_workspace/kernel_platform/common/out/" -name "Image" | head -n 1)
-          fi
-
-          if [ -n "$image_path" ] && [ -f "$image_path" ]; then
-            echo "Found Image: $image_path"
-            target_dir="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist/"
-            mkdir -p "$target_dir"
-            if [ "$(realpath "$image_path")" != "$(realpath "$target_dir/Image")" ]; then
-              cp "$image_path" "$target_dir"
-            else
-              echo "Source and target are the same, skip copy"
-            fi
-            cp "$target_dir/Image" ./AnyKernel3/Image
+          BASE_TAG="v1.5.8-r0"
+          LATEST_TAG=$(gh api repos/$REPO_OWNER/$REPO_NAME/tags --jq '.[0].name')
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="$BASE_TAG"
           else
-            echo "Image file not found, build may have failed"
-            exit 1
+            LATEST_TAG=$(printf "%s\n%s\n" "$LATEST_TAG" "$BASE_TAG" | sort -rV | head -n1)
           fi
+          NEW_TAG=$(echo "$LATEST_TAG" | awk -F'-r' '{suffix=$2; if (!suffix) suffix=0; suffix++; printf "%s-r%d", $1, suffix}')
+          echo "New tag: $NEW_TAG"
+          echo "NEW_TAG=${NEW_TAG}" >> $GITHUB_ENV
+          git tag $NEW_TAG
+          git push origin $NEW_TAG
 
-      - name: 📤 Upload AnyKernel3
-        uses: actions/upload-artifact@v4
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: AnyKernel3_KernelSU_Next_${{ env.KSUVER }}_${{ github.event.inputs.FEIL }}
-          path: ./AnyKernel3/*
+          path: ./downloaded-artifacts
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ env.NEW_TAG }}
+          prerelease: true
+          release_name: ${{ env.RELEASE_NAME }}
+          body: ${{ env.RELEASE_NOTES }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Release Assets
+        run: |
+          for file in ./downloaded-artifacts/kernel-*/*; do
+            if [ -d "$file" ]; then
+              continue
+            fi
+            echo "Uploading $file..."
+            gh release upload ${{ env.NEW_TAG }} "$file"
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_TAG: ${{ env.NEW_TAG }}
+
+      - name: List Uploaded Files
+        run: |
+          echo "GitHub release created with the following files:"
+          ls ./downloaded-artifacts/**/*
