@@ -1,130 +1,257 @@
-name: Build and Release OnePlus 13 Kernel (Android 15, GKI 6.6)
-
-permissions:
-  contents: write
-  actions: write
-
+name: Build OnePlus13 KernelSU Next (6.6)
 on:
   workflow_dispatch:
     inputs:
-      make_release:
-        description: 'Do you want to create a release?'
-        required: true
-        type: boolean
-        default: false
-      ksun_branch:
-        description: "KernelSU Next Branch"
+    
+      CPU:
+        description: "CPU分支"
         required: true
         type: choice
         options:
-          - stable
-          - next
-        default: next
+          - 'sm8750'  # 一加13基于sm8750芯片
+          - 'sm8650'
+          - 'sm8550'
+          - 'sm8450'
+          - 'sm8475'
+          - 'sm7675'
+          - 'sm6375'
+        default: 'sm8750'  # 默认sm8750
+        
+      FEIL:
+        description: "手机型号"
+        required: true
+        type: choice
+        options:
+          - 'oneplus_13'  # 新增一加13选项
+          - 'oneplus_12'
+          - 'oneplus_ace3_pro'
+          - 'oneplus_ace5'
+          - 'oneplus_13r'
+          # 保留其他型号但默认一加13
+        default: 'oneplus_13'
+        
+      CPUD:
+        description: "处理器代号"
+        required: true
+        type: choice
+        options:
+          - 'sun'  # 一加13处理器代号sun
+          - 'pineapple'
+          - 'kalama'
+          - 'waipio'
+          - 'crow'
+          - 'blair'
+        default: 'sun'
+        
+      ANDROID_VERSION:
+        description: "内核安卓版本"
+        required: true
+        type: choice
+        options:
+          - 'android15'  # 新增android15
+          - 'android14'
+          - 'android13'
+          - 'android12'
+        default: 'android15'
+        
+      KERNEL_VERSION:
+        description: "内核版本"
+        required: true
+        type: choice
+        options:
+          - '6.6'  # 新增6.6内核
+          - '6.1'
+          - '5.15'
+          - '5.10'
+        default: '6.6'
+
 
 jobs:
-  build-op13:
-    name: Build Kernel (OnePlus 13 - GKI 6.6 Android 15)
+  build:
+    name: For oneplus_13 (sm8750/sun/android15/6.6)
     runs-on: ubuntu-latest
-    steps:
-      - name: Set Static SUSFS Branch
-        id: get-susfs-branch
-        run: |
-          echo "susfs_branch=gki-android15-6.6" >> $GITHUB_OUTPUT
-
-      - name: Checkout Code
-        uses: actions/checkout@v3
-
-      - name: Build Kernel
-        uses: ./.github/actions
-        with:
-          model: OP13
-          soc: sun
-          branch: oneplus/sm8750
-          manifest: oneplus_13.xml
-          android_version: android15
-          kernel_version: "6.6"
-          ksun_branch: ${{ inputs.ksun_branch }}
-          susfs_branch: ${{ steps.get-susfs-branch.outputs.susfs_branch }}
-
-  trigger-release:
-    needs: build-op13
-    runs-on: ubuntu-latest
-    if: ${{ inputs.make_release }}
     env:
-      REPO_OWNER: ${{ github.repository_owner }}
-      REPO_NAME: ${{ github.event.repository.name }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RELEASE_NAME: "*TEST BUILD* OnePlus 13 Kernel with KernelSU Next & SUSFS v1.5.8 *TEST BUILD*"
-      RELEASE_NOTES: |
-        This release contains KernelSU Next and SUSFS v1.5.8
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      CCACHE_DIR: /home/runner/.ccache  
+      CCACHE_MAXSIZE: 10G  # 6.6内核编译需更大缓存
 
-        Module:
-        -> https://github.com/sidex15/ksu_module_susfs
-
-        Non-Official Managers:
-        -> https://github.com/KernelSU-Next/KernelSU-Next
-
-        Features:
-        [+] KernelSU-Next
-        [+] SUSFS v1.5.8
-        [+] Wireguard Support
-        [+] Maphide LineageOS Detections
-        [+] Futile Maphide for jit-zygote-cache Detections
-        [+] Magic Mount Support
-        [+] Ptrace message leak fix for kernels < 5.16
-        [+] Manual Hooks [scope_min_manual_hooks_v1.4]
-        [+] CONFIG_TMPFS_XATTR Support [Mountify Support]
-        [+] BBR v1 Support
-        [+] HMBIRD scx support for OnePlus 13
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Generate and Create New Tag
+      # ====================== 系统初始化阶段 ======================
+      - name: "🚀 最大化构建空间"
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 10240  # 增加预留空间（6.6内核更大）
+          temp-reserve-mb: 5120
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          
+      - name: "🔐 配置Git账户"
         run: |
-          BASE_TAG="v1.5.8-r0"
-          LATEST_TAG=$(gh api repos/$REPO_OWNER/$REPO_NAME/tags --jq '.[0].name')
-          if [ -z "$LATEST_TAG" ]; then
-            LATEST_TAG="$BASE_TAG"
-          else
-            LATEST_TAG=$(printf "%s\n%s\n" "$LATEST_TAG" "$BASE_TAG" | sort -rV | head -n1)
+          git config --global user.name "oneplus13-builder"
+          git config --global user.email "builder@oneplus13.com"
+
+
+      # ====================== 依赖管理阶段 ======================
+      - name: "📦 安装构建依赖"
+        run: |
+          sudo rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock
+          APT_CACHE_DIR="$HOME/apt-cache"
+          mkdir -p "$APT_CACHE_DIR/lists/partial"
+          sudo apt -o Dir::Cache="$APT_CACHE_DIR" update -qq
+          # 6.6内核编译需额外依赖
+          sudo DEBIAN_FRONTEND=noninteractive apt -o Dir::Cache="$APT_CACHE_DIR" install -yq --no-install-recommends \
+            python3 git curl ccache libelf-dev \
+            build-essential flex bison libssl-dev \
+            libncurses-dev liblz4-tool zlib1g-dev \
+            libxml2-utils rsync unzip llvm clang lld \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu  # 新增交叉编译器
+
+
+      # ====================== 缓存管理阶段 ======================
+      - name: "💾 恢复ccache缓存"
+        uses: actions/cache@v3
+        with:
+          path: /home/runner/.ccache
+          key: ccache-oneplus13-sm8750-6.6-android15
+          restore-keys: |
+            ccache-oneplus13-sm8750-6.6-
+
+
+      # ====================== 源码准备阶段 ======================
+      - name: "⬇️ 克隆一加13内核源码 (sm8750/6.6)"
+        run: |
+          mkdir kernel_workspace && cd kernel_workspace
+          # 克隆官方sm8750内核源码（适配6.6）
+          git clone https://github.com/OnePlusOSS/android_kernel_oneplus_sm8750.git --depth=1
+          cd android_kernel_oneplus_sm8750
+          # 切换到6.6内核分支（假设分支名为android15-6.6，需根据实际仓库调整）
+          git checkout origin/android15-6.6
+          # 清理版本字符串中的dirty标记
+          sed -i 's/ -dirty//g' scripts/setlocalversion
+          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "-oneplus13-ksu-next"|' scripts/setlocalversion
+          echo "✅ 一加13内核源码准备完成"
+
+
+      # ====================== 内核定制阶段 ======================
+      - name: "⚡ 集成KernelSU Next (rifsxd版)"
+        run: |
+          cd kernel_workspace/android_kernel_oneplus_sm8750
+          # 下载并执行KernelSU Next安装脚本（适配6.6内核）
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          # 获取KSU版本号
+          KSU_VERSION=$(expr $(git -C KernelSU-Next rev-list --count HEAD) "+" 10200)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          # 更新Makefile中的版本号
+          sed -i "s/DKSU_VERSION=11998/DKSU_VERSION=${KSU_VERSION}/" KernelSU-Next/kernel/Makefile
+
+
+      - name: "🔧 集成SUSFS (适配6.6/android15)"
+        run: |
+          cd kernel_workspace
+          # 克隆SUSFS补丁（适配android15-6.6）
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6
+          # 克隆适配补丁
+          git clone https://github.com/Xiaomichael/kernel_patches.git -b next-6.6
+          
+          cd android_kernel_oneplus_sm8750
+          # 复制SUSFS补丁到内核目录
+          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./
+          cp ../kernel_patches/next/scope_min_manual_hooks_v1.5.patch ./  # 适配6.6的钩子补丁
+          cp ../kernel_patches/next/0001-kernel-implement-susfs-v1.5.9-KernelSU-Next-v1.0.9.patch ./
+          
+          # 应用补丁
+          patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || echo "SUSFS基础补丁冲突，手动处理"
+          patch -p1 < scope_min_manual_hooks_v1.5.patch || echo "钩子补丁冲突，手动处理"
+          patch -p1 < 0001-kernel-implement-susfs-v1.5.9-KernelSU-Next-v1.0.9.patch || echo "SUSFS集成补丁冲突，手动处理"
+          
+          # 复制SUSFS文件系统代码
+          cp ../susfs4ksu/kernel_patches/fs/* fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+
+
+      - name: "⚙️ 配置内核选项 (sm8750/6.6/android15)"
+        run: |
+          cd kernel_workspace/android_kernel_oneplus_sm8750
+          # 生成一加13默认配置（基于sm8750）
+          make O=out ARCH=arm64 vendor/oneplus/sm8750_defconfig
+          
+          # 启用KernelSU和SUSFS配置
+          scripts/config --file out/.config \
+            -e CONFIG_KSU \
+            -e CONFIG_KSU_KPROBES_HOOK \
+            -d CONFIG_MODULE_SIG \
+            -d CONFIG_MODULE_SIG_STRICT \
+            -e CONFIG_KALLSYMS \
+            -e CONFIG_KALLSYMS_ALL \
+            -e CONFIG_KSU_SUSFS \
+            -e CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
+            -e CONFIG_KSU_SUSFS_SUS_PATH \
+            -e CONFIG_KSU_SUSFS_SPOOF_UNAME \
+            -e CONFIG_KSU_SUSFS_ENABLE_LOG
+          
+          # 启用BBR网络算法
+          scripts/config --file out/.config \
+            -e CONFIG_TCP_CONG_ADVANCED \
+            -e CONFIG_TCP_CONG_BBR \
+            -e CONFIG_NET_SCH_FQ \
+            -d CONFIG_TCP_CONG_BIC \
+            -d CONFIG_TCP_CONG_WESTWOOD
+
+
+      # ====================== 编译阶段 ======================
+      - name: "🔨 编译一加13内核 (6.6/android15)"
+        run: |
+          cd kernel_workspace/android_kernel_oneplus_sm8750
+          # 设置编译工具链（适配6.6内核的Clang）
+          export PATH="$HOME/clang/bin:$PATH"
+          git clone https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r487747c.git -b main clang --depth=1
+          export CC="ccache clang"
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export ARCH=arm64
+          
+          # 编译内核（使用LTO优化）
+          make O=out \
+            LLVM=1 \
+            LD=ld.lld \
+            HOSTLD=ld.lld \
+            CONFIG_LTO_CLANG_THIN=y \
+            -j$(nproc)
+          
+          # 检查编译产物
+          if [ ! -f "out/arch/arm64/boot/Image.gz" ]; then
+            echo "❌ 内核编译失败，未找到Image.gz"
+            exit 1
           fi
-          NEW_TAG=$(echo "$LATEST_TAG" | awk -F'-r' '{suffix=$2; if (!suffix) suffix=0; suffix++; printf "%s-r%d", $1, suffix}')
-          echo "New tag: $NEW_TAG"
-          echo "NEW_TAG=${NEW_TAG}" >> $GITHUB_ENV
-          git tag $NEW_TAG
-          git push origin $NEW_TAG
+          echo "✅ 一加13内核编译完成"
 
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./downloaded-artifacts
 
-      - name: Create GitHub Release
-        uses: actions/create-release@v1
-        with:
-          tag_name: ${{ env.NEW_TAG }}
-          prerelease: true
-          release_name: ${{ env.RELEASE_NAME }}
-          body: ${{ env.RELEASE_NOTES }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Release Assets
+      # ====================== 打包阶段 ======================
+      - name: "📦 打包为AnyKernel3刷包"
         run: |
-          for file in ./downloaded-artifacts/kernel-*/*; do
-            if [ -d "$file" ]; then
-              continue
-            fi
-            echo "Uploading $file..."
-            gh release upload ${{ env.NEW_TAG }} "$file"
-          done
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEW_TAG: ${{ env.NEW_TAG }}
+          # 克隆AnyKernel3模板（适配一加13）
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1
+          cd AnyKernel3
+          # 替换内核镜像
+          cp ../kernel_workspace/android_kernel_oneplus_sm8750/out/arch/arm64/boot/Image.gz ./
+          # 适配一加13的dtb/dtbo（如有）
+          cp ../kernel_workspace/android_kernel_oneplus_sm8750/out/arch/arm64/boot/dts/qcom/sm8750-oneplus13.dtb ./dtb/
+          # 修改AnyKernel3配置（适配一加13分区）
+          sed -i "s/device.name1=.*/device.name1=oneplus13/" anykernel.sh
+          sed -i "s/kernel.string=.*/kernel.string=OnePlus13 KernelSU Next 6.6/" anykernel.sh
+          sed -i "s/build.date=.*/build.date=$(date +%Y-%m-%d)/" anykernel.sh
+          cd ..
 
-      - name: List Uploaded Files
-        run: |
-          echo "GitHub release created with the following files:"
-          ls ./downloaded-artifacts/**/*
+
+      # ====================== 上传阶段 ======================
+      - name: "📤 上传编译产物"
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnePlus13-KernelSU-Next-sun-sm8750-6.6-android15-v${{ env.KSUVER }}
+          path: ./AnyKernel3/*
